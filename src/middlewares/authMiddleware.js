@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { users } = require('../data/store');
+const { usersById } = require('../data/store');
 
 /**
  * Middleware to authenticate requests using JWT tokens.
@@ -17,7 +17,7 @@ const authMiddleware = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_jwt_key_12345');
     
     // Find the user in our in-memory store
-    const user = users.find((u) => u.id === decoded.id);
+    const user = usersById[decoded.id];
     if (!user) {
       return res.status(401).json({ error: 'User no longer exists.' });
     }

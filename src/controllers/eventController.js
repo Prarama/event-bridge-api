@@ -1,4 +1,4 @@
-const { events, users } = require('../data/store');
+const { events, eventsById } = require('../data/store');
 const { sendEventRegistrationEmail } = require('../services/emailService');
 
 /**
@@ -9,29 +9,67 @@ const generateId = () => {
 };
 
 /**
+ * Helper to parse and return a valid Date object from date & time strings
+ */
+const getEventDateObj = (dateStr, timeStr) => {
+  const parsed = Date.parse(`${dateStr} ${timeStr}`);
+  return isNaN(parsed) ? null : new Date(parsed);
+};
+
+/**
  * Create a new event (POST /events)
  * Restricted to: organizer
  */
 const createEvent = async (req, res) => {
   try {
-    const { title, description, date, time } = req.body;
+    const { title, description, date, time, capacity } = req.body;
 
-    // Validation
+    // Validation for required fields
     if (!title || !description || !date || !time) {
       return res.status(400).json({ error: 'Title, description, date, and time are required.' });
     }
 
+    const trimmedTitle = title.trim();
+    const trimmedDesc = description.trim();
+    const trimmedDate = date.trim();
+    const trimmedTime = time.trim();
+
+    if (trimmedTitle === '' || trimmedDesc === '' || trimmedDate === '' || trimmedTime === '') {
+      return res.status(400).json({ error: 'Required fields cannot be empty strings.' });
+    }
+
+    // Validate event date & time (must be valid and in the future)
+    const eventDateObj = getEventDateObj(trimmedDate, trimmedTime);
+    if (!eventDateObj) {
+      return res.status(400).json({ error: 'Invalid date or time format.' });
+    }
+    if (eventDateObj <= new Date()) {
+      return res.status(400).json({ error: 'Event date and time must be in the future.' });
+    }
+
+    // Validate capacity parameter if provided
+    let parsedCapacity = null;
+    if (capacity !== undefined && capacity !== null) {
+      parsedCapacity = parseInt(capacity, 10);
+      if (isNaN(parsedCapacity) || parsedCapacity <= 0) {
+        return res.status(400).json({ error: 'Capacity must be a positive integer.' });
+      }
+    }
+
     const newEvent = {
       id: generateId(),
-      title,
-      description,
-      date,
-      time,
+      title: trimmedTitle,
+      description: trimmedDesc,
+      date: trimmedDate,
+      time: trimmedTime,
+      capacity: parsedCapacity,
       organizerId: req.user.id,
-      participants: [], // In-memory storage for participants: array of user objects { userId, name, email }
+      participants: [], // array of objects { userId, name, email }
     };
 
+    // Store in-memory and update O(1) index
     events.push(newEvent);
+    eventsById[newEvent.id] = newEvent;
 
     return res.status(201).json({
       message: 'Event created successfully.',
@@ -64,7 +102,8 @@ const getEvents = async (req, res) => {
  */
 const getEventById = async (req, res) => {
   try {
-    const event = events.find((e) => e.id === req.params.id);
+    // Look up via O(1) index map
+    const event = eventsById[req.params.id];
     if (!event) {
       return res.status(404).json({ error: 'Event not found.' });
     }
@@ -81,10 +120,11 @@ const getEventById = async (req, res) => {
  */
 const updateEvent = async (req, res) => {
   try {
-    const { title, description, date, time } = req.body;
+    const { title, description, date, time, capacity } = req.body;
     const eventId = req.params.id;
 
-    const event = events.find((e) => e.id === eventId);
+    // Fast O(1) lookup
+    const event = eventsById[eventId];
     if (!event) {
       return res.status(404).json({ error: 'Event not found.' });
     }
@@ -94,11 +134,53 @@ const updateEvent = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden. You can only update your own events.' });
     }
 
-    // Update fields
-    if (title !== undefined) event.title = title;
-    if (description !== undefined) event.description = description;
-    if (date !== undefined) event.date = date;
-    if (time !== undefined) event.time = time;
+    // Input sanitization & empty updates prevention
+    if (title !== undefined && title.trim() === '') {
+      return res.status(400).json({ error: 'Title cannot be empty.' });
+    }
+    if (description !== undefined && description.trim() === '') {
+      return res.status(400).json({ error: 'Description cannot be empty.' });
+    }
+    if (date !== undefined && date.trim() === '') {
+      return res.status(400).json({ error: 'Date cannot be empty.' });
+    }
+    if (time !== undefined && time.trim() === '') {
+      return res.status(400).json({ error: 'Time cannot be empty.' });
+    }
+
+    // Validate date & time updates (must be in the future)
+    const finalDate = date !== undefined ? date.trim() : event.date;
+    const finalTime = time !== undefined ? time.trim() : event.time;
+    if (date !== undefined || time !== undefined) {
+      const parsedDate = getEventDateObj(finalDate, finalTime);
+      if (!parsedDate) {
+        return res.status(400).json({ error: 'Invalid date or time format.' });
+      }
+      if (parsedDate <= new Date()) {
+        return res.status(400).json({ error: 'Event date and time must be in the future.' });
+      }
+    }
+
+    // Validate capacity updates
+    let parsedCapacity = event.capacity;
+    if (capacity !== undefined) {
+      if (capacity === null) {
+        parsedCapacity = null;
+      } else {
+        const checkVal = parseInt(capacity, 10);
+        if (isNaN(checkVal) || checkVal <= 0) {
+          return res.status(400).json({ error: 'Capacity must be a positive integer.' });
+        }
+        parsedCapacity = checkVal;
+      }
+    }
+
+    // Apply updates
+    if (title !== undefined) event.title = title.trim();
+    if (description !== undefined) event.description = description.trim();
+    if (date !== undefined) event.date = finalDate;
+    if (time !== undefined) event.time = finalTime;
+    event.capacity = parsedCapacity;
 
     return res.status(200).json({
       message: 'Event updated successfully.',
@@ -128,8 +210,9 @@ const deleteEvent = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden. You can only delete your own events.' });
     }
 
-    // Remove from in-memory array
+    // Remove from in-memory array and delete from O(1) index map
     events.splice(eventIndex, 1);
+    delete eventsById[eventId];
 
     return res.status(200).json({
       message: 'Event deleted successfully.',
@@ -147,10 +230,24 @@ const deleteEvent = async (req, res) => {
 const registerForEvent = async (req, res) => {
   try {
     const eventId = req.params.id;
-    const event = events.find((e) => e.id === eventId);
+    // O(1) lookup
+    const event = eventsById[eventId];
 
     if (!event) {
       return res.status(404).json({ error: 'Event not found.' });
+    }
+
+    // Prevent registration for events that have already occurred
+    const eventDateObj = getEventDateObj(event.date, event.time);
+    if (eventDateObj && eventDateObj <= new Date()) {
+      return res.status(400).json({ error: 'Registration is closed because the event has already occurred.' });
+    }
+
+    // Prevent registration if capacity limit has been reached
+    if (event.capacity !== null && event.capacity !== undefined) {
+      if (event.participants.length >= event.capacity) {
+        return res.status(400).json({ error: 'Registration failed. Event capacity is full.' });
+      }
     }
 
     // Prevent duplicate registration
